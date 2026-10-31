@@ -1,0 +1,13 @@
+# CMake build trees and generated binaries
+build*/
+
+# CMake-generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+
+# Local editor and OS files
+.vscode/
+.DS_Store
