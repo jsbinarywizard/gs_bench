@@ -1,6 +1,9 @@
 #pragma once
 
 #include <Kokkos_Core.hpp>
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+#include <Kokkos_Graph.hpp>
+#endif
 #if defined(KOKKOS_ENABLE_CUDA)
 #include <Kokkos_Cuda.hpp>
 #include <nccl.h>
@@ -19,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 namespace gs_bench {
 
@@ -275,5 +279,103 @@ inline int estimate_benchmark_iterations(double warmup_elapsed, int warmup_itera
     return std::max(
         1, static_cast<int>(std::ceil(benchmark_time * warmup_iterations / warmup_elapsed)));
 }
+
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+template <typename Real = double>
+class KernelGraphs {
+    using graph_type = Kokkos::Experimental::Graph<execution_space>;
+
+    graph_type before_communication_;
+    graph_type after_communication_;
+
+    static graph_type make_before_graph(const Fields<Real>& fields, const Partition& part,
+                                        const execution_space& stream) {
+        const auto u = fields.u;
+        const auto v = fields.v;
+        const auto next_u = fields.next_u;
+        const auto next_v = fields.next_v;
+        const auto send_top = fields.send_top;
+        const auto send_bottom = fields.send_bottom;
+        const int rows = part.rows;
+        const int columns = part.columns;
+
+        return Kokkos::Experimental::create_graph(
+            stream, [&](auto root) {
+                coefficients<Real> c;
+                auto node = root.then_parallel_for(
+                    "compute bulk",
+                    Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<2>>(
+                        stream, {2, 1}, {rows, columns + 1}),
+                    KOKKOS_LAMBDA(const int row, const int column) {
+                        gs_kernel<Real, true>(row, column, u, v, next_u, next_v, c);
+                    });
+                auto pack_top = node.then_parallel_for(
+                    "pack top", Kokkos::RangePolicy<execution_space>(stream, 0, columns),
+                    KOKKOS_LAMBDA(const int column) {
+                        send_top(column) = u(1, column + 1);
+                        send_top(columns + column) = v(1, column + 1);
+                    });
+                pack_top.then_parallel_for(
+                    "pack bottom",
+                    Kokkos::RangePolicy<execution_space>(stream, 0, columns),
+                    KOKKOS_LAMBDA(const int column) {
+                        send_bottom(column) = u(rows, column + 1);
+                        send_bottom(columns + column) = v(rows, column + 1);
+                    });
+            });
+    }
+
+    static graph_type make_after_graph(const Fields<Real>& fields, const Partition& part,
+                                       const execution_space& stream) {
+        const auto u = fields.u;
+        const auto v = fields.v;
+        const auto next_u = fields.next_u;
+        const auto next_v = fields.next_v;
+        const auto recv_top = fields.recv_top;
+        const auto recv_bottom = fields.recv_bottom;
+        const int columns = part.columns;
+        const int bottom_row = part.rows + 1;
+
+        return Kokkos::Experimental::create_graph(
+            stream, [&](auto root) {
+                auto unpack_top = root.then_parallel_for(
+                    "unpack top", Kokkos::RangePolicy<execution_space>(stream, 0, columns),
+                    KOKKOS_LAMBDA(const int column) {
+                        u(0, column + 1) = recv_top(column);
+                        v(0, column + 1) = recv_top(columns + column);
+                    });
+                coefficients<Real> c;
+                auto compute_top = unpack_top.then_parallel_for(
+                    "compute top",
+                    Kokkos::RangePolicy<execution_space>(stream, 1, columns + 1),
+                    KOKKOS_LAMBDA(const int column) {
+                        gs_kernel<Real, true>(1, column, u, v, next_u, next_v, c);
+                    });
+                auto unpack_bottom = compute_top.then_parallel_for(
+                    "unpack bottom",
+                    Kokkos::RangePolicy<execution_space>(stream, 0, columns),
+                    KOKKOS_LAMBDA(const int column) {
+                        u(bottom_row, column + 1) = recv_bottom(column);
+                        v(bottom_row, column + 1) = recv_bottom(columns + column);
+                    });
+                unpack_bottom.then_parallel_for(
+                    "compute bottom",
+                    Kokkos::RangePolicy<execution_space>(stream, 1, columns + 1),
+                    KOKKOS_LAMBDA(const int column) {
+                        gs_kernel<Real, true>(bottom_row - 1, column, u, v, next_u, next_v, c);
+                    });
+            });
+    }
+
+public:
+    KernelGraphs(const Fields<Real>& fields, const Partition& part,
+                 const execution_space& stream)
+        : before_communication_(make_before_graph(fields, part, stream)),
+          after_communication_(make_after_graph(fields, part, stream)) {}
+
+    void submit_before() const { before_communication_.submit(); }
+    void submit_after() const { after_communication_.submit(); }
+};
+#endif
 
 }  // namespace gs_bench

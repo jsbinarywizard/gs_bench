@@ -41,34 +41,53 @@ int run(int argc, char** argv) {
 
     Fields<> fields(part);
     initialize_fields(fields, streams);
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+    Fields<> alternate_fields = fields;
+    alternate_fields.swap_fields();
+    const std::array<KernelGraphs<>, 2> kernel_graphs = {
+        KernelGraphs<>(fields, part, streams.streams[0]),
+        KernelGraphs<>(alternate_fields, part, streams.streams[0])};
+    int graph_phase = 0;
+#endif
     GS_MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
     const auto execute_iteration = [&]() {
         if (args.config.periodic[0]) {
             periodic_x(fields.u, part, streams.streams[0]);
             periodic_x(fields.v, part, streams.streams[0]);
-            streams.streams[0].fence();
         }
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        kernel_graphs[graph_phase].submit_before();
+#else
+        streams.streams[0].fence();
         compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
         pack_row(fields.u, fields.v, fields.send_top, 1, part, streams.streams[3]);
         pack_row(fields.u, fields.v, fields.send_bottom, part.rows, part, streams.streams[4]);
+#endif
         GS_NCCL_CHECK(ncclGroupStart());
         GS_NCCL_CHECK(ncclRecv(fields.recv_top.data(), buffer_count(part), nccl_datatype<>(),
                                part.top_rank(),
-                               communicator, streams.native(1)));
+                               communicator, streams.native(0)));
         GS_NCCL_CHECK(ncclRecv(fields.recv_bottom.data(), buffer_count(part), nccl_datatype<>(),
-                               part.bottom_rank(), communicator, streams.native(2)));
+                               part.bottom_rank(), communicator, streams.native(0)));
         GS_NCCL_CHECK(ncclSend(fields.send_top.data(), buffer_count(part), nccl_datatype<>(),
                                part.top_rank(),
-                               communicator, streams.native(3)));
+                               communicator, streams.native(0)));
         GS_NCCL_CHECK(ncclSend(fields.send_bottom.data(), buffer_count(part), nccl_datatype<>(),
-                               part.bottom_rank(), communicator, streams.native(4)));
+                               part.bottom_rank(),                                communicator, streams.native(0)));
         GS_NCCL_CHECK(ncclGroupEnd());
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        kernel_graphs[graph_phase].submit_after();
+#else
         unpack_row(fields.u, fields.v, fields.recv_top, 0, part, streams.streams[1]);
         compute_top(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[1]);
         unpack_row(fields.u, fields.v, fields.recv_bottom, part.rows + 1, part, streams.streams[2]);
         compute_bottom(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[2]);
+#endif
         streams.fence();
         fields.swap_fields();
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        graph_phase ^= 1;
+#endif
     };
     const double warmup_start = MPI_Wtime();
     int warmup_iterations = 0;

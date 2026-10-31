@@ -24,6 +24,14 @@ int run(int argc, char** argv) {
     const StreamSet streams;
     Fields<> fields(part);
     initialize_fields(fields, streams);
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+    Fields<> alternate_fields = fields;
+    alternate_fields.swap_fields();
+    const std::array<KernelGraphs<>, 2> kernel_graphs = {
+        KernelGraphs<>(fields, part, streams.streams[0]),
+        KernelGraphs<>(alternate_fields, part, streams.streams[0])};
+    int graph_phase = 0;
+#endif
 
     MPI_Request requests[4];
     GS_MPI_CHECK(MPI_Recv_init(fields.recv_top.data(), buffer_count(part), mpi_datatype<>(),
@@ -42,32 +50,50 @@ int run(int argc, char** argv) {
             periodic_x(fields.v, part, streams.streams[0]);
             streams.streams[0].fence();
         }
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        kernel_graphs[graph_phase].submit_before();
+#else
         compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
         streams.streams[0].fence();
+#endif
         GS_MPI_CHECK(MPI_Start(&requests[0]));
         GS_MPI_CHECK(MPI_Start(&requests[1]));
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        streams.streams[0].fence();
+#else
         pack_row(fields.u, fields.v, fields.send_top, 1, part, streams.streams[3]);
         pack_row(fields.u, fields.v, fields.send_bottom, part.rows, part, streams.streams[4]);
         streams.streams[3].fence();
         streams.streams[4].fence();
+#endif
         GS_MPI_CHECK(MPI_Start(&requests[2]));
         GS_MPI_CHECK(MPI_Start(&requests[3]));
         for (int receives_completed = 0; receives_completed < 2; ++receives_completed) {
             int completed_request = MPI_UNDEFINED;
             GS_MPI_CHECK(MPI_Waitany(2, requests, &completed_request, MPI_STATUS_IGNORE));
             if (completed_request == 0) {
+#if !defined(KOKKOS_ENABLE_CUDA) && !defined(KOKKOS_ENABLE_HIP)
                 unpack_row(fields.u, fields.v, fields.recv_top, 0, part, streams.streams[1]);
                 compute_top(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[1]);
+#endif
             } else if (completed_request == 1) {
+#if !defined(KOKKOS_ENABLE_CUDA) && !defined(KOKKOS_ENABLE_HIP)
                 unpack_row(fields.u, fields.v, fields.recv_bottom, part.rows + 1, part,
                            streams.streams[2]);
                 compute_bottom(fields.u, fields.v, fields.next_u, fields.next_v,
                               streams.streams[2]);
+#endif
             }
         }
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        kernel_graphs[graph_phase].submit_after();
+#endif
         GS_MPI_CHECK(MPI_Waitall(2, &requests[2], MPI_STATUSES_IGNORE));
         streams.fence();
         fields.swap_fields();
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+        graph_phase ^= 1;
+#endif
     };
     const double warmup_start = MPI_Wtime();
     int warmup_iterations = 0;
