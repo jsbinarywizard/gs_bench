@@ -45,13 +45,14 @@ int run(int argc, char** argv) {
     const auto execute_iteration = [&]() {
         if (args.config.periodic[0]) {
             periodic_x(fields.u, part, streams.streams[0]);
-            periodic_x(fields.v, part, streams.streams[0]);
+            periodic_x(fields.v, part, streams.streams[1]);
             streams.streams[0].fence();
+            streams.streams[1].fence();
         }
-        compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
         pack_row(fields.u, fields.v, fields.send_top, 1, part, streams.streams[3]);
         pack_row(fields.u, fields.v, fields.send_bottom, part.rows, part, streams.streams[4]);
-        GS_NCCL_CHECK(ncclGroupStart());
+        compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
+        //GS_NCCL_CHECK(ncclGroupStart());
         GS_NCCL_CHECK(ncclRecv(fields.recv_top.data(), buffer_count(part), nccl_datatype<>(),
                                part.top_rank(),
                                communicator, streams.native(1)));
@@ -62,7 +63,7 @@ int run(int argc, char** argv) {
                                communicator, streams.native(3)));
         GS_NCCL_CHECK(ncclSend(fields.send_bottom.data(), buffer_count(part), nccl_datatype<>(),
                                part.bottom_rank(), communicator, streams.native(4)));
-        GS_NCCL_CHECK(ncclGroupEnd());
+        //GS_NCCL_CHECK(ncclGroupEnd());
         unpack_row(fields.u, fields.v, fields.recv_top, 0, part, streams.streams[1]);
         compute_top(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[1]);
         unpack_row(fields.u, fields.v, fields.recv_bottom, part.rows + 1, part, streams.streams[2]);
@@ -101,12 +102,9 @@ int run(int argc, char** argv) {
     if (part.rank == 0) {
         results_writer->write({"nccl-rccl", precision_name<double>(), test.scaling, rank_count,
                                test.size, benchmark_iterations, elapsed,
-                               benchmark_iterations / elapsed});
+                               (benchmark_iterations * test.global_rows * test.columns) / elapsed});
     }
-    if (part.rank == 0)
-        std::printf("nccl-rccl,%s,%d,%.6f,%.3f\n",
-                    scaling_name(test.scaling), test.size, elapsed,
-                    benchmark_iterations / elapsed);
+
     GS_NCCL_CHECK(ncclCommDestroy(communicator));
     }
     GS_MPI_CHECK(MPI_Finalize());

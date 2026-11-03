@@ -39,18 +39,18 @@ int run(int argc, char** argv) {
     const auto execute_iteration = [&]() {
         if (args.config.periodic[0]) {
             periodic_x(fields.u, part, streams.streams[0]);
-            periodic_x(fields.v, part, streams.streams[0]);
+            periodic_x(fields.v, part, streams.streams[1]);
             streams.streams[0].fence();
+            streams.streams[1].fence();
         }
-        compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
-        streams.streams[0].fence();
         GS_MPI_CHECK(MPI_Start(&requests[0]));
         GS_MPI_CHECK(MPI_Start(&requests[1]));
         pack_row(fields.u, fields.v, fields.send_top, 1, part, streams.streams[3]);
         pack_row(fields.u, fields.v, fields.send_bottom, part.rows, part, streams.streams[4]);
+        compute_bulk(fields.u, fields.v, fields.next_u, fields.next_v, streams.streams[0]);
         streams.streams[3].fence();
-        streams.streams[4].fence();
         GS_MPI_CHECK(MPI_Start(&requests[2]));
+        streams.streams[4].fence();
         GS_MPI_CHECK(MPI_Start(&requests[3]));
         for (int receives_completed = 0; receives_completed < 2; ++receives_completed) {
             int completed_request = MPI_UNDEFINED;
@@ -97,15 +97,12 @@ int run(int argc, char** argv) {
     }
     streams.fence();
     const double elapsed = MPI_Wtime() - start_time;
-    if (part.rank == 0) {
-        results_writer->write({"mpi-persistent", precision_name<double>(), test.scaling,
-                               rank_count, test.size, benchmark_iterations, elapsed,
-                               benchmark_iterations / elapsed});
-    }
-    if (part.rank == 0)
-        std::printf("mpi-persistent,%s,%d,%.6f,%.3f\n",
-                    scaling_name(test.scaling), test.size, elapsed,
-                    benchmark_iterations / elapsed);
+
+    results_writer->write({"mpi-persistent", precision_name<double>(), test.scaling,
+                            rank_count, test.size, benchmark_iterations, elapsed,
+                            (benchmark_iterations * test.global_rows * test.columns) / elapsed});
+    
+
     for (auto& request : requests) GS_MPI_CHECK(MPI_Request_free(&request));
     }
     GS_MPI_CHECK(MPI_Finalize());
