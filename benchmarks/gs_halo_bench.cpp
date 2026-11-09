@@ -20,6 +20,9 @@
 // Run (one GPU per rank):
 //   srun --gpus-per-task=1 --gpu-bind=closest ./gs_halo_bench --sizes 512,2048 --time 1.0
 //   options: --sizes a,b,c   --time seconds   --strong   --variants mpi,rccl1,rccl2
+//            --output file.csv   (default gs_halo_results.csv; results are APPENDED, the header
+//                                 is only written to an empty file, so runs with different rank
+//                                 counts can accumulate in one file; rank 0 writes it)
 
 #include <mpi.h>
 #include <Kokkos_Core.hpp>
@@ -300,6 +303,7 @@ int main(int argc, char** argv) {
   std::vector<int> sizes = {128, 256, 512, 1024, 2048, 4096};
   double target = 1.0;
   bool strong = false;
+  std::string out_path = "gs_halo_results.csv";
   bool want[3] = {true, true, true};
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--sizes") && i + 1 < argc) {
@@ -309,6 +313,8 @@ int main(int argc, char** argv) {
       while (tok) { sizes.push_back(std::atoi(tok)); tok = std::strtok(nullptr, ","); }
     } else if (!std::strcmp(argv[i], "--time") && i + 1 < argc) {
       target = std::atof(argv[++i]);
+    } else if (!std::strcmp(argv[i], "--output") && i + 1 < argc) {
+      out_path = argv[++i];
     } else if (!std::strcmp(argv[i], "--strong")) {
       strong = true;
     } else if (!std::strcmp(argv[i], "--variants") && i + 1 < argc) {
@@ -331,9 +337,21 @@ int main(int argc, char** argv) {
     if (want[1]) comm1 = make_comm(rank, size);
     if (want[2]) { commA = make_comm(rank, size); commB = make_comm(rank, size); }
 
+    static const char* csv_header =
+        "variant,scaling,ranks,size,iterations,sec_per_step,updates_per_s,check\n";
+    std::FILE* out = nullptr;   // only rank 0 writes the file
     if (rank == 0) {
-      std::printf("# ranks=%d scaling=%s target_time=%.2fs\n", size, strong ? "strong" : "weak", target);
-      std::printf("variant,scaling,ranks,size,iterations,sec_per_step,updates_per_s,check\n");
+      std::printf("# ranks=%d scaling=%s target_time=%.2fs output=%s\n", size,
+                  strong ? "strong" : "weak", target, out_path.c_str());
+      std::printf("%s", csv_header);
+      out = std::fopen(out_path.c_str(), "a");
+      if (!out) {
+        std::fprintf(stderr, "Cannot open output file '%s'\n", out_path.c_str());
+        MPI_Abort(MPI_COMM_WORLD, 1);
+      }
+      std::fseek(out, 0, SEEK_END);
+      if (std::ftell(out) == 0) std::fputs(csv_header, out);   // header only for a new file
+      std::fflush(out);
     }
 
     {   // everything holding Exec instances or Views lives in this scope
@@ -376,9 +394,13 @@ int main(int argc, char** argv) {
             const double per_step = run_timing(v, s, ctx, target, iters);
             if (rank == 0) {
               const double updates = double(rows) * cols * size / per_step;
-              std::printf("%s,%s,%d,%d,%d,%.6e,%.6e,%s\n", variant_name(v),
-                          strong ? "strong" : "weak", size, n, iters, per_step, updates,
-                          ok ? "PASS" : "FAIL");
+              char line[256];
+              std::snprintf(line, sizeof(line), "%s,%s,%d,%d,%d,%.6e,%.6e,%s\n",
+                            variant_name(v), strong ? "strong" : "weak", size, n, iters,
+                            per_step, updates, ok ? "PASS" : "FAIL");
+              std::fputs(line, stdout);
+              std::fputs(line, out);
+              std::fflush(out);   // keep results even if a later case crashes
             }
           }
         }
@@ -387,6 +409,7 @@ int main(int argc, char** argv) {
       fence_all(Ctx{Domain{}, e0, e1, e2, h1, h2, nullptr, nullptr, nullptr});
     }   // Exec instances destroyed while the streams are still valid
 
+    if (out) std::fclose(out);
     if (comm1) NCCL_CHECK(ncclCommDestroy(comm1));
     if (commA) NCCL_CHECK(ncclCommDestroy(commA));
     if (commB) NCCL_CHECK(ncclCommDestroy(commB));
