@@ -6,7 +6,6 @@
 using namespace gs_bench;
 
 int run(int argc, char **argv) {
-  GS_MPI_CHECK(MPI_Init(&argc, &argv));
   const Arguments args = parse_arguments(argc, argv);
   int rank_count = 0;
   int rank = 0;
@@ -120,6 +119,8 @@ int run(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  GS_MPI_CHECK(MPI_Init(&argc, &argv));
+  select_local_gpu();
   Kokkos::initialize(argc, argv);
   const int result = run(argc, argv);
   Kokkos::finalize();

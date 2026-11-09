@@ -94,6 +94,42 @@ inline void check_mpi(int error, const char* expression, const char* file, int l
 
 #define GS_MPI_CHECK(call) ::gs_bench::check_mpi((call), #call, __FILE__, __LINE__)
 
+inline void select_local_gpu() {
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+    MPI_Comm local_communicator = MPI_COMM_NULL;
+    GS_MPI_CHECK(MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0,
+                                     MPI_INFO_NULL, &local_communicator));
+
+    int local_rank = 0;
+    GS_MPI_CHECK(MPI_Comm_rank(local_communicator, &local_rank));
+    GS_MPI_CHECK(MPI_Comm_free(&local_communicator));
+
+    int device_count = 0;
+#if defined(KOKKOS_ENABLE_CUDA)
+    const auto runtime_error = cudaGetDeviceCount(&device_count);
+#else
+    const auto runtime_error = hipGetDeviceCount(&device_count);
+#endif
+    if (runtime_error != 0 || local_rank >= device_count) {
+        std::fprintf(stderr,
+                     "MPI local rank %d cannot select a GPU (visible devices: %d)\n",
+                     local_rank, device_count);
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+#if defined(KOKKOS_ENABLE_CUDA)
+    if (cudaSetDevice(local_rank) != cudaSuccess) {
+        std::fprintf(stderr, "Unable to select CUDA device %d\n", local_rank);
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+#else
+    if (hipSetDevice(local_rank) != hipSuccess) {
+        std::fprintf(stderr, "Unable to select HIP device %d\n", local_rank);
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+#endif
+#endif
+}
+
 struct Arguments {
     BenchmarkConfig config;
 };

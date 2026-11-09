@@ -19,7 +19,6 @@ using namespace gs_bench;
 //   stream 0: compute_bulk
 //   stream 1: pack(top,bottom) -> nccl group -> unpack(top,bottom) -> compute_top/bottom
 int run(int argc, char** argv) {
-    GS_MPI_CHECK(MPI_Init(&argc, &argv));
     const Arguments args = parse_arguments(argc, argv);
     int rank_count = 0;
     int rank = 0;
@@ -115,6 +114,8 @@ int run(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    GS_MPI_CHECK(MPI_Init(&argc, &argv));
+    select_local_gpu();
     Kokkos::initialize(argc, argv);
     const int result = run(argc, argv);
     Kokkos::finalize();
