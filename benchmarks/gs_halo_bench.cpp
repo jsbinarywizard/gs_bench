@@ -271,7 +271,7 @@ static double run_timing(Variant v, State& s, const Ctx& x, double target, int& 
   fence_all(x);
   double per = (MPI_Wtime() - t0) / 10.0, per_max = 0.0;
   MPI_CHECK(MPI_Allreduce(&per, &per_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD));
-  const int iters = std::max(1, int(std::ceil(target / per_max)));   // same on all ranks
+  const int iters = std::max(20, int(std::ceil(target / per_max)));   // same on all ranks
   MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
   t0 = MPI_Wtime();
   for (int i = 0; i < iters; ++i) step(v, s, x);
